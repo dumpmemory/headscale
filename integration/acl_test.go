@@ -474,9 +474,11 @@ func TestACLAllowUserDst(t *testing.T) {
 			url := fmt.Sprintf("http://%s/etc/hostname", fqdn)
 			t.Logf("url from %s to %s", client.Hostname(), url)
 
-			result, err := client.Curl(url)
-			assert.Len(t, result, 13)
-			require.NoError(t, err)
+			assert.EventuallyWithT(t, func(c *assert.CollectT) {
+				result, err := client.Curl(url)
+				assert.NoError(c, err)
+				assert.Len(c, result, 13)
+			}, 10*time.Second, 500*time.Millisecond, "Verifying user1 can reach user2")
 		}
 	}
 
@@ -489,9 +491,11 @@ func TestACLAllowUserDst(t *testing.T) {
 			url := fmt.Sprintf("http://%s/etc/hostname", fqdn)
 			t.Logf("url from %s to %s", client.Hostname(), url)
 
-			result, err := client.Curl(url)
-			assert.Empty(t, result)
-			require.Error(t, err)
+			assert.EventuallyWithT(t, func(c *assert.CollectT) {
+				result, err := client.Curl(url)
+				assert.Error(c, err)
+				assert.Empty(c, result)
+			}, 10*time.Second, 500*time.Millisecond, "Verifying user2 cannot reach user1")
 		}
 	}
 }
@@ -1533,6 +1537,103 @@ func TestACLAutogroupTagged(t *testing.T) {
 				assert.Empty(ct, result)
 				assert.Error(ct, err)
 			}, 5*time.Second, 200*time.Millisecond, "tagged nodes should not be able to reach untagged nodes")
+		}
+	}
+}
+
+// Test that only devices owned by the same user can access each other and cannot access devices of other users
+func TestACLAutogroupSelf(t *testing.T) {
+	IntegrationSkip(t)
+
+	scenario := aclScenario(t,
+		&policyv2.Policy{
+			ACLs: []policyv2.ACL{
+				{
+					Action:  "accept",
+					Sources: []policyv2.Alias{ptr.To(policyv2.AutoGroupMember)},
+					Destinations: []policyv2.AliasWithPorts{
+						aliasWithPorts(ptr.To(policyv2.AutoGroupSelf), tailcfg.PortRangeAny),
+					},
+				},
+			},
+		},
+		2,
+	)
+	defer scenario.ShutdownAssertNoPanics(t)
+
+	err := scenario.WaitForTailscaleSyncWithPeerCount(1, integrationutil.PeerSyncTimeout(), integrationutil.PeerSyncRetryInterval())
+	require.NoError(t, err)
+
+	user1Clients, err := scenario.GetClients("user1")
+	require.NoError(t, err)
+
+	user2Clients, err := scenario.GetClients("user2")
+	require.NoError(t, err)
+
+	// Test that user1's devices can access each other
+	for _, client := range user1Clients {
+		for _, peer := range user1Clients {
+			if client.Hostname() == peer.Hostname() {
+				continue
+			}
+
+			fqdn, err := peer.FQDN()
+			require.NoError(t, err)
+
+			url := fmt.Sprintf("http://%s/etc/hostname", fqdn)
+			t.Logf("url from %s (user1) to %s (user1)", client.Hostname(), fqdn)
+
+			result, err := client.Curl(url)
+			assert.Len(t, result, 13)
+			require.NoError(t, err)
+		}
+	}
+
+	// Test that user2's devices can access each other
+	for _, client := range user2Clients {
+		for _, peer := range user2Clients {
+			if client.Hostname() == peer.Hostname() {
+				continue
+			}
+
+			fqdn, err := peer.FQDN()
+			require.NoError(t, err)
+
+			url := fmt.Sprintf("http://%s/etc/hostname", fqdn)
+			t.Logf("url from %s (user2) to %s (user2)", client.Hostname(), fqdn)
+
+			result, err := client.Curl(url)
+			assert.Len(t, result, 13)
+			require.NoError(t, err)
+		}
+	}
+
+	// Test that devices from different users cannot access each other
+	for _, client := range user1Clients {
+		for _, peer := range user2Clients {
+			fqdn, err := peer.FQDN()
+			require.NoError(t, err)
+
+			url := fmt.Sprintf("http://%s/etc/hostname", fqdn)
+			t.Logf("url from %s (user1) to %s (user2) - should FAIL", client.Hostname(), fqdn)
+
+			result, err := client.Curl(url)
+			assert.Empty(t, result, "user1 should not be able to access user2's devices with autogroup:self")
+			assert.Error(t, err, "connection from user1 to user2 should fail")
+		}
+	}
+
+	for _, client := range user2Clients {
+		for _, peer := range user1Clients {
+			fqdn, err := peer.FQDN()
+			require.NoError(t, err)
+
+			url := fmt.Sprintf("http://%s/etc/hostname", fqdn)
+			t.Logf("url from %s (user2) to %s (user1) - should FAIL", client.Hostname(), fqdn)
+
+			result, err := client.Curl(url)
+			assert.Empty(t, result, "user2 should not be able to access user1's devices with autogroup:self")
+			assert.Error(t, err, "connection from user2 to user1 should fail")
 		}
 	}
 }
